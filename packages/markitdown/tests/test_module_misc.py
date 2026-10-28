@@ -23,6 +23,19 @@ skip_remote = (
     True if os.environ.get("GITHUB_ACTIONS") else False
 )  # Don't run these tests in CI
 
+# Speech-to-text endpoint used by AudioConverter (SpeechRecognition's recognize_google)
+SPEECH_SERVICE_URL = "http://www.google.com/speech-api/v2/recognize"
+
+
+def skip_if_unreachable(url: str) -> None:
+    """Skips the calling test when `url` can't be reached (offline or blocked network)."""
+    import requests
+
+    try:
+        requests.head(url, timeout=10, allow_redirects=True)
+    except requests.RequestException as e:
+        pytest.skip(f"no network access to {url}: {type(e).__name__}")
+
 
 # Don't run the llm tests without a key and the client library
 skip_llm = False if os.environ.get("OPENAI_API_KEY") else True
@@ -356,6 +369,7 @@ def test_doc_rlink() -> None:
     reason="do not run tests that query external urls",
 )
 def test_markitdown_remote() -> None:
+    skip_if_unreachable(PDF_TEST_URL)
     markitdown = MarkItDown()
 
     # By URL
@@ -374,6 +388,7 @@ def test_markitdown_remote() -> None:
     reason="do not run remotely run speech transcription tests",
 )
 def test_speech_transcription() -> None:
+    skip_if_unreachable(SPEECH_SERVICE_URL)
     markitdown = MarkItDown()
 
     # Test WAV files, MP3 and M4A files
