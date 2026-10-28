@@ -27,6 +27,9 @@ ACCEPTED_MIME_TYPE_PREFIXES = [
 
 ACCEPTED_FILE_EXTENSIONS = [".docx"]
 
+# Mammoth drops page breaks by default; render them as <hr> (Markdown "---")
+PAGE_BREAK_STYLE_MAP = "br[type='page'] => hr"
+
 
 class DocxConverter(HtmlConverter):
     """
@@ -76,7 +79,16 @@ class DocxConverter(HtmlConverter):
             )
 
         style_map = kwargs.get("style_map", None)
-        pre_process_stream = pre_process_docx(file_stream)
+        # Show tracked insertions/deletions as {++inserted++} / {--deleted--}
+        track_changes = kwargs.get("docx_track_changes", True)
+        # Show manual page breaks as horizontal rules (---)
+        page_breaks = kwargs.get("docx_page_breaks", True)
+
+        if page_breaks:
+            # Mammoth uses the first matching rule, so a caller's own style_map wins
+            style_map = (style_map or "") + "\n" + PAGE_BREAK_STYLE_MAP
+
+        pre_process_stream = pre_process_docx(file_stream, track_changes=track_changes)
         html = mammoth.convert_to_html(
             pre_process_stream,
             style_map=style_map,

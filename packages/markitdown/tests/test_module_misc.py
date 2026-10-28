@@ -274,6 +274,28 @@ def test_docx_equations() -> None:
     assert block_equations, "No block equations found in the document."
 
 
+def test_docx_tracked_changes_and_page_breaks() -> None:
+    markitdown = MarkItDown()
+    docx_file = os.path.join(TEST_FILES_DIR, "test_tracked_changes.docx")
+
+    # By default, tracked changes use CriticMarkup and page breaks become rules
+    text = markitdown.convert(docx_file).text_content
+    assert "Payment due in {--30--}{++60++} days." in text
+    assert "End of page one\n\n---\n\nStart of page two" in text
+    assert "Untouched paragraph" in text
+
+    # Both features can be turned off
+    text = markitdown.convert(
+        docx_file, docx_track_changes=False, docx_page_breaks=False
+    ).text_content
+    assert "Payment due in 60 days." in text
+    assert "{++" not in text and "{--" not in text and "---" not in text
+
+    # A caller's own style_map takes priority over the page-break rule
+    text = markitdown.convert(docx_file, style_map="br[type='page'] => ").text_content
+    assert "---" not in text
+
+
 def test_input_as_strings() -> None:
     markitdown = MarkItDown()
 
@@ -489,6 +511,7 @@ if __name__ == "__main__":
         test_data_uris,
         test_file_uris,
         test_docx_comments,
+        test_docx_tracked_changes_and_page_breaks,
         test_input_as_strings,
         test_markitdown_remote,
         test_speech_transcription,

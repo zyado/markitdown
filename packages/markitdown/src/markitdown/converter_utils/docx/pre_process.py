@@ -115,16 +115,93 @@ def _pre_process_math(content: bytes) -> bytes:
     return str(soup).encode()
 
 
-def pre_process_docx(input_docx: BinaryIO) -> BinaryIO:
+# CriticMarkup delimiters (https://criticmarkup.com) used to show tracked changes
+INSERTION_MARKERS = ("{++", "++}")
+DELETION_MARKERS = ("{--", "--}")
+
+# Revision elements and whether they represent inserted (True) or deleted (False) text
+_REVISION_TAGS = {"ins": True, "moveTo": True, "del": False, "moveFrom": False}
+
+
+def _make_text_run(text: str) -> Tag:
+    """Creates a plain <w:r><w:t>text</w:t></w:r> run."""
+    t_tag = Tag(name="w:t", attrs={"xml:space": "preserve"})
+    t_tag.string = text
+    r_tag = Tag(name="w:r")
+    r_tag.append(t_tag)
+    return r_tag
+
+
+def _mark_revision(tag: Tag, inserted: bool) -> None:
+    """
+    Wraps the runs of a single tracked change (<w:ins>, <w:del>, <w:moveTo> or <w:moveFrom>)
+    in CriticMarkup delimiters, and turns deleted text into ordinary text so it is not dropped.
+    """
+    runs = tag.find_all("r")
+    if not runs:
+        # Revision marks with no runs (e.g. an inserted paragraph mark) carry no text
+        return
+
+    if not inserted:
+        # Deleted text lives in <w:delText>/<w:delInstrText>, which converters skip
+        for del_text in tag.find_all("delText"):
+            del_text.name = "t"
+        for del_instr in tag.find_all("delInstrText"):
+            del_instr.name = "instrText"
+
+    if not any(t.get_text() for t in tag.find_all("t")):
+        return
+
+    opening, closing = INSERTION_MARKERS if inserted else DELETION_MARKERS
+    runs[0].insert_before(_make_text_run(opening))
+    runs[-1].insert_after(_make_text_run(closing))
+
+    if not inserted:
+        # Converters skip <w:del>/<w:moveFrom> entirely, so lift the runs out of it
+        tag.unwrap()
+
+
+def _pre_process_tracked_changes(soup: BeautifulSoup) -> None:
+    """
+    Shows tracked changes inline: insertions as {++text++} and deletions as {--text--}.
+    Without this step, insertions appear as ordinary text and deletions are silently dropped.
+    """
+    for name, inserted in _REVISION_TAGS.items():
+        for tag in soup.find_all(name):
+            # <w:ins>/<w:del> inside run or paragraph properties only flag formatting
+            # or paragraph-mark changes, not text, so skip them
+            if tag.parent is not None and tag.parent.name in ("rPr", "pPr"):
+                continue
+            _mark_revision(tag, inserted)
+
+
+def _pre_process_xml(
+    content: bytes, track_changes: bool = True, process_math: bool = True
+) -> bytes:
+    """Applies all enabled pre-processing steps to one DOCX XML part."""
+    soup = BeautifulSoup(content.decode(), features="xml")
+    if track_changes:
+        _pre_process_tracked_changes(soup)
+    if process_math:
+        for tag in soup.find_all("oMathPara"):
+            _replace_equations(tag)
+        for tag in soup.find_all("oMath"):
+            _replace_equations(tag)
+    return str(soup).encode()
+
+
+def pre_process_docx(input_docx: BinaryIO, track_changes: bool = True) -> BinaryIO:
     """
     Pre-processes a DOCX file with provided steps.
 
     The process works by unzipping the DOCX file in memory, transforming specific XML files
-    (such as converting OMML elements to LaTeX), and then zipping everything back into a
-    DOCX file without writing to disk.
+    (such as converting OMML elements to LaTeX and marking tracked changes), and then
+    zipping everything back into a DOCX file without writing to disk.
 
     Args:
         input_docx (BinaryIO): A binary input stream representing the DOCX file.
+        track_changes (bool, optional): If True, tracked insertions and deletions are shown
+            with CriticMarkup ({++inserted++}, {--deleted--}). Defaults to True.
 
     Returns:
         BinaryIO: A binary output stream representing the processed DOCX file.
@@ -142,14 +219,24 @@ def pre_process_docx(input_docx: BinaryIO) -> BinaryIO:
             zip_output.comment = zip_input.comment
             for name, content in files.items():
                 if name in pre_process_enable_files:
-                    try:
-                        # Pre-process the content
-                        updated_content = _pre_process_math(content)
-                        # In the future, if there are more pre-processing steps, they can be added here
-                        zip_output.writestr(name, updated_content)
-                    except Exception:
-                        # If there is an error in processing the content, write the original content
-                        zip_output.writestr(name, content)
+                    # Try all steps together, then each step alone, so one failing
+                    # step (e.g. an unusual equation) doesn't disable the others
+                    attempts = [
+                        dict(track_changes=track_changes, process_math=True),
+                        dict(track_changes=False, process_math=True),
+                        dict(track_changes=track_changes, process_math=False),
+                    ]
+                    updated_content = content
+                    for options in attempts:
+                        if not (options["track_changes"] or options["process_math"]):
+                            continue
+                        try:
+                            updated_content = _pre_process_xml(content, **options)
+                            break
+                        except Exception:
+                            # If there is an error in processing the content, try the next option
+                            continue
+                    zip_output.writestr(name, updated_content)
                 else:
                     zip_output.writestr(name, content)
     output_docx.seek(0)
